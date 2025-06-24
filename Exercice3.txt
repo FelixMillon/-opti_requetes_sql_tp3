@@ -1,0 +1,158 @@
+
+3.1 Requête avec plusieurs conditions
+
+Query:
+
+EXPLAIN ANALYSE
+SELECT *
+FROM title_basics
+WHERE start_year = '1994' AND (
+      genres LIKE 'Drama'
+   OR genres LIKE 'Drama,%'
+   OR genres LIKE '%,Drama'
+   OR genres LIKE '%,Drama,%'
+);
+
+3.2 Analyse de performance sans index
+
+Result:
+
+"Gather  (cost=1000.00..286521.11 rows=16508 width=85) (actual time=28.483..583.886 rows=21003 loops=1)"
+"  Workers Planned: 2"
+"  Workers Launched: 2"
+"  ->  Parallel Seq Scan on title_basics  (cost=0.00..283870.31 rows=6878 width=85) (actual time=11.670..551.096 rows=7001 loops=3)"
+"        Filter: ((start_year = 1994) AND (((genres)::text ~~ 'Drama'::text) OR ((genres)::text ~~ 'Drama,%'::text) OR ((genres)::text ~~ '%,Drama'::text) OR ((genres)::text ~~ '%,Drama,%'::text)))"
+"        Rows Removed by Filter: 3904619"
+"Planning Time: 0.655 ms"
+"JIT:"
+"  Functions: 6"
+"  Options: Inlining false, Optimization false, Expressions true, Deforming true"
+"  Timing: Generation 1.881 ms (Deform 0.517 ms), Inlining 0.000 ms, Optimization 2.026 ms, Emission 15.063 ms, Total 18.970 ms"
+"Execution Time: 586.077 ms"
+
+Perfomances:
+1) stratégie PostgreSQL: Parallel Seq Scan on title_basics
+2) 21003 de lignes réelles retournées
+3) lignes examinées puis rejetées:3.904.619
+4) temps d’exécution total: 586.077 ms
+
+
+3.3 Index sur colonnes individuelles
+
+Queries:
+CREATE INDEX idx_title_basics_start_year ON title_basics (start_year);
+CREATE INDEX idx_title_basics_genres ON title_basics (genres);
+
+Résultats:
+"Bitmap Heap Scan on title_basics  (cost=708.63..128526.82 rows=16508 width=85) (actual time=22.664..262.403 rows=21003 loops=1)"
+"  Recheck Cond: (start_year = 1994)"
+"  Filter: (((genres)::text ~~ 'Drama'::text) OR ((genres)::text ~~ 'Drama,%'::text) OR ((genres)::text ~~ '%,Drama'::text) OR ((genres)::text ~~ '%,Drama,%'::text))"
+"  Rows Removed by Filter: 47961"
+"  Heap Blocks: exact=20823"
+"  ->  Bitmap Index Scan on idx_title_basics_start_year  (cost=0.00..704.50 rows=64542 width=0) (actual time=8.905..8.905 rows=68964 loops=1)"
+"        Index Cond: (start_year = 1994)"
+"Planning Time: 1.784 ms"
+"JIT:"
+"  Functions: 4"
+"  Options: Inlining false, Optimization false, Expressions true, Deforming true"
+"  Timing: Generation 1.829 ms (Deform 0.420 ms), Inlining 0.000 ms, Optimization 1.121 ms, Emission 8.875 ms, Total 11.826 ms"
+"Execution Time: 265.376 ms"
+
+Perfomances:
+1) stratégie PostgreSQL: Bitmap Heap Scan on title_basics
+2) 21003 de lignes réelles retournées
+3) lignes examinées puis rejetées:47961
+4) temps d’exécution total: 265.376 ms
+
+QUE INDEX DE « YEAR » a été utilisé!!! Donc on va créer un autre index pour « Genre » qui est compatible avec la colonne « Genre » - trigramme
+
+Query:
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX idx_title_basics_genres_trgm ON title_basics USING gin (genres gin_trgm_ops);
+
+
+Result:
+"Bitmap Heap Scan on title_basics  (cost=28962.31..82236.64 rows=16508 width=85) (actual time=1239.423..1446.975 rows=21003 loops=1)"
+"  Recheck Cond: ((start_year = 1994) AND (((genres)::text ~~ 'Drama'::text) OR ((genres)::text ~~ 'Drama,%'::text) OR ((genres)::text ~~ '%,Drama'::text) OR ((genres)::text ~~ '%,Drama,%'::text)))"
+"  Rows Removed by Index Recheck: 36603"
+"  Heap Blocks: exact=17905"
+"  ->  BitmapAnd  (cost=28962.31..28962.31 rows=18221 width=0) (actual time=1237.796..1237.798 rows=0 loops=1)"
+"        ->  Bitmap Index Scan on idx_title_basics_start_year  (cost=0.00..704.50 rows=64542 width=0) (actual time=4.697..4.697 rows=68964 loops=1)"
+"              Index Cond: (start_year = 1994)"
+"        ->  BitmapOr  (cost=28253.43..28253.43 rows=3312881 width=0) (actual time=1232.562..1232.563 rows=0 loops=1)"
+"              ->  Bitmap Index Scan on idx_title_basics_genres_trgm  (cost=0.00..9370.35 rows=1290443 width=0) (actual time=352.994..352.994 rows=3305135 loops=1)"
+"                    Index Cond: ((genres)::text ~~ 'Drama'::text)"
+"              ->  Bitmap Index Scan on idx_title_basics_genres_trgm  (cost=0.00..8609.04 rows=1138183 width=0) (actual time=299.583..299.583 rows=3305135 loops=1)"
+"                    Index Cond: ((genres)::text ~~ 'Drama,%'::text)"
+"              ->  Bitmap Index Scan on idx_title_basics_genres_trgm  (cost=0.00..4631.10 rows=342595 width=0) (actual time=292.126..292.126 rows=3305135 loops=1)"
+"                    Index Cond: ((genres)::text ~~ '%,Drama'::text)"
+"              ->  Bitmap Index Scan on idx_title_basics_genres_trgm  (cost=0.00..5626.43 rows=541661 width=0) (actual time=287.856..287.856 rows=3305135 loops=1)"
+"                    Index Cond: ((genres)::text ~~ '%,Drama,%'::text)"
+"Planning Time: 1.295 ms"
+"Execution Time: 1447.641 ms"
+
+Perfomances:
+1) stratégie PostgreSQL: Bitmap Heap Scan sur les deux index
+2) 21003 de lignes réelles retournées
+3) lignes examinées puis rejetées:36603
+4) temps d’exécution total: 1447.641 ms
+
+
+3.4 Index composite
+
+Query:
+CREATE INDEX idx_title_basics_startyear_genres ON title_basics (start_year, genres);
+Query returned successfully in 5 secs 562 msec.
+
+Result:
+"Bitmap Heap Scan on title_basics  (cost=724.63..128542.82 rows=16508 width=85) (actual time=18.711..256.443 rows=21003 loops=1)"
+"  Recheck Cond: (start_year = 1994)"
+"  Filter: (((genres)::text ~~ 'Drama'::text) OR ((genres)::text ~~ 'Drama,%'::text) OR ((genres)::text ~~ '%,Drama'::text) OR ((genres)::text ~~ '%,Drama,%'::text))"
+"  Rows Removed by Filter: 47961"
+"  Heap Blocks: exact=20823"
+"  ->  Bitmap Index Scan on idx_title_basics_startyear_genres  (cost=0.00..720.50 rows=64542 width=0) (actual time=7.310..7.310 rows=68964 loops=1)"
+"        Index Cond: (start_year = 1994)"
+"Planning Time: 1.224 ms"
+"JIT:"
+"  Functions: 4"
+"  Options: Inlining false, Optimization false, Expressions true, Deforming true"
+"  Timing: Generation 1.181 ms (Deform 0.275 ms), Inlining 0.000 ms, Optimization 1.103 ms, Emission 7.010 ms, Total 9.295 ms"
+"Execution Time: 258.456 ms"
+
+Perfomances:
+1) stratégie PostgreSQL: Bitmap Heap Scan avec un seul Index exclusivement, Bitmap nest pas compatibles avec requêtes LIKE ’%,Drama' ou  ‘LIKE '%,Drama,%’.
+2) 21003 de lignes réelles retournées
+3) lignes examinées puis rejetées:47961
+4) temps d’exécution total: 258.456 ms
+
+Test de l’ordre de colonnes:
+
+Query:
+CREATE INDEX idx_title_basics_genres_startyear ON title_basics (genres, start_year);
+
+"Bitmap Heap Scan on title_basics  (cost=130380.01..258198.21 rows=16508 width=85) (actual time=87.055..256.099 rows=21003 loops=1)"
+"  Recheck Cond: (start_year = 1994)"
+"  Filter: (((genres)::text ~~ 'Drama'::text) OR ((genres)::text ~~ 'Drama,%'::text) OR ((genres)::text ~~ '%,Drama'::text) OR ((genres)::text ~~ '%,Drama,%'::text))"
+"  Rows Removed by Filter: 47961"
+"  Heap Blocks: exact=20823"
+"  ->  Bitmap Index Scan on idx_title_basics_genres_startyear  (cost=0.00..130375.88 rows=64542 width=0) (actual time=81.190..81.191 rows=68964 loops=1)"
+"        Index Cond: (start_year = 1994)"
+"Planning Time: 1.070 ms"
+"JIT:"
+"  Functions: 4"
+"  Options: Inlining false, Optimization false, Expressions true, Deforming true"
+"  Timing: Generation 2.138 ms (Deform 0.402 ms), Inlining 0.000 ms, Optimization 0.502 ms, Emission 3.371 ms, Total 6.010 ms"
+"Execution Time: 258.990 ms"
+
+Performance: Le changement de l’ordre n’a pas changé les performance car c’est toujours l’index de « Year » qui était utilisé et celui de « genre » n’était 
+
+3.6 Analyse et réflexion
+
+1) Normalement l’index composite doit être plus performant que les index séparés et il faut bien choisir quelle colonne doit être la première dans l’index composite, c’est crucial;
+2) Index composite est préférable quand on fait filtrage de plusieurs colonnes
+3) A mon avis la première colonne doit être celle qui est la plus sélective, qui permet d’obtenir les résultats les plus spécifiques à moindre cadence 
+
+
+
+
+
